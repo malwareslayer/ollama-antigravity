@@ -1,0 +1,5 @@
+/ollama-antigravity
+*.pkg.tar.zst
+*.tar.gz
+/packaging/aur/src/
+/packaging/aur/pkg/
