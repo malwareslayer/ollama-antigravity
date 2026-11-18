@@ -532,6 +532,9 @@ func (w *worker) callSessionPrompt(
 	prompt []ContentBlock,
 	events chan<- StreamEvent,
 ) (sessionPromptResult, error) {
+	var prefixBuf strings.Builder
+	prefixFlushed := false
+
 	raw, err := w.rpcCall(ctx, "session/prompt", sessionPromptParams{
 		SessionID: sid,
 		Prompt:    prompt,
@@ -559,11 +562,23 @@ func (w *worker) callSessionPrompt(
 				return fmt.Errorf("%w: %s", ErrNativeToolBlocked, toolName)
 			}
 		case "agent_message_chunk":
-			if upd.Update.Content.Text != "" {
-				w.emit(ctx, events, StreamEvent{
-					Type: EventTextChunk,
-					Text: upd.Update.Content.Text,
-				})
+			txt := upd.Update.Content.Text
+			if txt == "" {
+				return nil
+			}
+			if prefixFlushed {
+				w.emit(ctx, events, StreamEvent{Type: EventTextChunk, Text: txt})
+				return nil
+			}
+			prefixBuf.WriteString(txt)
+			cur := prefixBuf.String()
+			if IsQuotaErrorText(cur) {
+				return fmt.Errorf("%w: %s", ErrQuotaExhausted, strings.TrimSpace(cur))
+			}
+			if !mightBeQuotaPrefix(cur) || prefixBuf.Len() >= 256 {
+				prefixFlushed = true
+				w.emit(ctx, events, StreamEvent{Type: EventTextChunk, Text: cur})
+				prefixBuf.Reset()
 			}
 		case "agent_thought_chunk":
 			if upd.Update.Content.Text != "" {
@@ -578,11 +593,31 @@ func (w *worker) callSessionPrompt(
 	if err != nil {
 		return sessionPromptResult{}, err
 	}
+	if !prefixFlushed && prefixBuf.Len() > 0 {
+		cur := prefixBuf.String()
+		if IsQuotaErrorText(cur) {
+			return sessionPromptResult{}, fmt.Errorf("%w: %s", ErrQuotaExhausted, strings.TrimSpace(cur))
+		}
+		w.emit(ctx, events, StreamEvent{Type: EventTextChunk, Text: cur})
+	}
 	var res sessionPromptResult
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return sessionPromptResult{}, fmt.Errorf("decode session/prompt result: %w", err)
 	}
 	return res, nil
+}
+
+func mightBeQuotaPrefix(s string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(s))
+	if trimmed == "" {
+		return true
+	}
+	for _, p := range []string{"⚠", "your ai", "ai credits", "credits", "resource_exhausted", "daily or billing", "quota", "model_capacity"} {
+		if strings.HasPrefix(trimmed, p) || strings.HasPrefix(p, trimmed) || strings.Contains(trimmed, "⚠") {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *worker) callSessionClose(ctx context.Context, sid string) error {
