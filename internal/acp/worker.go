@@ -3,6 +3,8 @@ package acp
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,6 +81,12 @@ type worker struct {
 
 	proc   *childProc
 	nextID int64
+
+	sessionID      string
+	sessionModel   string
+	sessionSysHash string
+	sessionTurns   int
+	sessionTokens  int
 }
 
 func newWorker(id int, cfg config.Config, logger *slog.Logger, pool *Pool) *worker {
@@ -326,7 +334,16 @@ func (w *worker) drainStderr(r io.Reader, done chan<- struct{}) {
 	}
 }
 
+func (w *worker) resetSessionState() {
+	w.sessionID = ""
+	w.sessionModel = ""
+	w.sessionSysHash = ""
+	w.sessionTurns = 0
+	w.sessionTokens = 0
+}
+
 func (w *worker) killAndReap() {
+	w.resetSessionState()
 	proc := w.proc
 	if proc == nil {
 		return
@@ -359,34 +376,69 @@ func (w *worker) executeSession(
 	req PromptRequest,
 	events chan<- StreamEvent,
 ) (usage Usage, evalDur time.Duration, dirty bool, err error) {
-	newRes, err := w.callSessionNew(ctx, req.SystemPrompt)
-	if err != nil {
-		return Usage{}, 0, true, fmt.Errorf("session/new: %w", err)
-	}
-	w.pool.updateCatalog(newRes.Models.AvailableModels)
+	sysHash := hashSystemPrompt(req.SystemPrompt)
+	canReuse := w.cfg.SessionReuse &&
+		w.sessionID != "" &&
+		w.sessionSysHash == sysHash &&
+		w.sessionTurns < w.cfg.SessionMaxTurns &&
+		w.sessionTokens < w.cfg.SessionMaxTokens
 
-	sid := newRes.SessionID
-	if req.ModelID != "" && req.ModelID != newRes.Models.CurrentModelID {
-		if err := w.callSessionSetModel(ctx, sid, req.ModelID); err != nil {
+	if !canReuse {
+		if w.sessionID != "" {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = w.callSessionClose(closeCtx, w.sessionID)
+			cancel()
+			w.resetSessionState()
+		}
+
+		newRes, err := w.callSessionNew(ctx, req.SystemPrompt)
+		if err != nil {
+			return Usage{}, 0, true, fmt.Errorf("session/new: %w", err)
+		}
+		w.pool.updateCatalog(newRes.Models.AvailableModels)
+		w.sessionID = newRes.SessionID
+		w.sessionModel = newRes.Models.CurrentModelID
+		w.sessionSysHash = sysHash
+		w.sessionTurns = 0
+		w.sessionTokens = 0
+	}
+
+	if req.ModelID != "" && req.ModelID != w.sessionModel {
+		if err := w.callSessionSetModel(ctx, w.sessionID, req.ModelID); err != nil {
+			w.resetSessionState()
 			return Usage{}, 0, true, fmt.Errorf("session/set_model(%s): %w", req.ModelID, err)
 		}
+		w.sessionModel = req.ModelID
 	}
 
 	evalStart := time.Now()
-	promptRes, err := w.callSessionPrompt(ctx, sid, req.Prompt, events)
+	promptRes, err := w.callSessionPrompt(ctx, w.sessionID, req.Prompt, events)
 	evalDur = time.Since(evalStart)
 	if err != nil {
+		w.resetSessionState()
 		return Usage{}, evalDur, true, fmt.Errorf("session/prompt: %w", err)
 	}
 
-	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if closeErr := w.callSessionClose(closeCtx, sid); closeErr != nil {
-		w.logger.Warn("session/close failed, marking worker dirty", "err", closeErr)
-		return promptRes.Usage, evalDur, true, nil
+	w.sessionTurns++
+	w.sessionTokens = promptRes.Usage.TotalTokens
+
+	if !w.cfg.SessionReuse || w.sessionTurns >= w.cfg.SessionMaxTurns || w.sessionTokens >= w.cfg.SessionMaxTokens {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeErr := w.callSessionClose(closeCtx, w.sessionID)
+		cancel()
+		w.resetSessionState()
+		if closeErr != nil {
+			w.logger.Warn("session/close failed, marking worker dirty", "err", closeErr)
+			return promptRes.Usage, evalDur, true, nil
+		}
 	}
 
 	return promptRes.Usage, evalDur, false, nil
+}
+
+func hashSystemPrompt(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 func (w *worker) callInitialize(ctx context.Context) error {

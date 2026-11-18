@@ -22,6 +22,9 @@ type Config struct {
 	IncludeDefaultCustom bool
 	Sandbox              bool
 	RestrictNativeTools  bool
+	SessionReuse         bool
+	SessionMaxTurns      int
+	SessionMaxTokens     int
 	LogLevel             slog.Level
 }
 
@@ -39,6 +42,9 @@ func Load() (Config, error) {
 		IncludeDefaultCustom: false,
 		Sandbox:              true,
 		RestrictNativeTools:  true,
+		SessionReuse:         true,
+		SessionMaxTurns:      20,
+		SessionMaxTokens:     120000,
 		LogLevel:             slog.LevelInfo,
 	}
 
@@ -92,6 +98,30 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("invalid ACP_RESTRICT_NATIVE_TOOLS=%q: %w", raw, err)
 		}
 		cfg.RestrictNativeTools = b
+	}
+
+	if raw, ok := os.LookupEnv("ACP_SESSION_REUSE"); ok {
+		b, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return cfg, fmt.Errorf("invalid ACP_SESSION_REUSE=%q: %w", raw, err)
+		}
+		cfg.SessionReuse = b
+	}
+
+	if v := strings.TrimSpace(os.Getenv("ACP_SESSION_MAX_TURNS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return cfg, fmt.Errorf("invalid ACP_SESSION_MAX_TURNS=%q: must be positive integer", v)
+		}
+		cfg.SessionMaxTurns = n
+	}
+
+	if v := strings.TrimSpace(os.Getenv("ACP_SESSION_MAX_TOKENS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1000 {
+			return cfg, fmt.Errorf("invalid ACP_SESSION_MAX_TOKENS=%q: must be >= 1000", v)
+		}
+		cfg.SessionMaxTokens = n
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("LOG_LEVEL")); raw != "" {

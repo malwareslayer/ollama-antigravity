@@ -470,7 +470,7 @@ func buildChatPrompt(modelID string, req ChatRequest) acp.PromptRequest {
 			"(run_command, write_to_file, view_file, read_file, edit_file, replace_file_content, " +
 			"multi_replace_file_content, find_by_name, grep_search, list_dir, browser, etc.) are DISABLED " +
 			"and will fail or terminate the session immediately. NEVER emit native Antigravity function calls " +
-			"or invoke local filesystem, shell, or IDE tools. Answer directly from the conversation input.",
+			"or invoke local filesystem, shell, or IDE tools. Treat each request as independent and answer directly from its input.",
 	}
 
 	var convMsgs []ChatMessage
