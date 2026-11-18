@@ -49,9 +49,9 @@ type clientInfo struct {
 }
 
 type sessionNewParams struct {
-	CWD        string           `json:"cwd"`
-	MCPServers []any            `json:"mcpServers"`
-	Meta       *sessionNewMeta  `json:"_meta,omitempty"`
+	CWD        string          `json:"cwd"`
+	MCPServers []any           `json:"mcpServers"`
+	Meta       *sessionNewMeta `json:"_meta,omitempty"`
 }
 
 type sessionNewMeta struct {

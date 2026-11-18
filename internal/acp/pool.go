@@ -13,6 +13,7 @@ import (
 	"ollama-antigravity/internal/config"
 )
 
+// Sentinel errors returned by Pool and model resolution.
 var (
 	ErrPoolClosed    = errors.New("acp worker pool is closed")
 	ErrModelExcluded = errors.New("requested model is excluded")
@@ -56,12 +57,12 @@ func NewPool(cfg config.Config, logger *slog.Logger) *Pool {
 
 // Start ensures ACP_EMPTY_CWD exists, spawns all workers, and waits for initial handshakes.
 func (p *Pool) Start(ctx context.Context) error {
-	if err := os.MkdirAll(p.cfg.EmptyCWD, 0o755); err != nil {
+	if err := os.MkdirAll(p.cfg.EmptyCWD, 0o750); err != nil {
 		return fmt.Errorf("create ACP_EMPTY_CWD %q: %w", p.cfg.EmptyCWD, err)
 	}
 
 	initCh := make(chan error, p.cfg.Workers)
-	for i := 0; i < p.cfg.Workers; i++ {
+	for i := range p.cfg.Workers {
 		w := newWorker(i, p.cfg, p.logger, p)
 		p.workers = append(p.workers, w)
 		w.start(initCh)
@@ -69,7 +70,7 @@ func (p *Pool) Start(ctx context.Context) error {
 
 	var successes int
 	var firstErr error
-	for i := 0; i < p.cfg.Workers; i++ {
+	for range p.cfg.Workers {
 		select {
 		case err := <-initCh:
 			if err == nil {

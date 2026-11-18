@@ -16,10 +16,16 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("fatal error", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("failed to load config", "err", err)
-		os.Exit(1)
+		return err
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -42,12 +48,11 @@ func main() {
 
 	pool := acp.NewPool(cfg, logger)
 	startCtx, cancelStart := context.WithTimeout(rootCtx, 45*time.Second)
-	if err := pool.Start(startCtx); err != nil {
-		cancelStart()
-		logger.Error("failed to start acp worker pool", "err", err)
-		os.Exit(1)
-	}
+	err = pool.Start(startCtx)
 	cancelStart()
+	if err != nil {
+		return err
+	}
 	defer pool.Stop()
 
 	srv := ollama.NewServer(pool, logger)
@@ -61,8 +66,8 @@ func main() {
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("http server listening", "addr", cfg.ListenAddr)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+		if listenErr := httpSrv.ListenAndServe(); listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+			errCh <- listenErr
 		}
 		close(errCh)
 	}()
@@ -70,10 +75,9 @@ func main() {
 	select {
 	case <-rootCtx.Done():
 		logger.Info("shutdown signal received")
-	case err := <-errCh:
-		if err != nil {
-			logger.Error("http server error", "err", err)
-			os.Exit(1)
+	case srvErr := <-errCh:
+		if srvErr != nil {
+			return srvErr
 		}
 	}
 
@@ -84,4 +88,5 @@ func main() {
 	}
 	pool.Stop()
 	logger.Info("shutdown complete")
+	return nil
 }

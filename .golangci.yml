@@ -1,0 +1,59 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - intrange
+    - misspell
+    - nilerr
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    revive:
+      rules:
+        - name: exported
+        - name: var-naming
+        - name: error-return
+        - name: error-strings
+        - name: if-return
+        - name: early-return
+        - name: indent-error-flow
+    gosec:
+      excludes:
+        - G104 # covered by errcheck
+        - G204 # subprocess execution is core to acp worker
+        - G304 # reading configured log/temp paths is intentional
+        - G704 # no untrusted SSRF sink here
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true

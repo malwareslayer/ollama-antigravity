@@ -56,6 +56,7 @@ type PromptRequest struct {
 // StreamEventType classifies events emitted during prompt execution.
 type StreamEventType int
 
+// Stream event types emitted by a worker during prompt execution.
 const (
 	EventTextChunk StreamEventType = iota
 	EventThoughtChunk
@@ -270,7 +271,7 @@ func (w *worker) spawnAndInit() error {
 	}
 	if w.cfg.IsolatedGeminiDir {
 		geminiEmpty := filepath.Join(w.cfg.EmptyCWD, ".gemini-empty")
-		_ = os.MkdirAll(geminiEmpty, 0o755)
+		_ = os.MkdirAll(geminiEmpty, 0o750)
 		args = append(args, "--gemini-dir", geminiEmpty)
 	}
 
@@ -435,9 +436,9 @@ func (w *worker) executeSession(
 			w.resetSessionState()
 		}
 
-		newRes, err := w.callSessionNew(ctx, req.SystemPrompt)
-		if err != nil {
-			return Usage{}, 0, true, fmt.Errorf("session/new: %w", err)
+		newRes, newErr := w.callSessionNew(ctx, req.SystemPrompt)
+		if newErr != nil {
+			return Usage{}, 0, true, fmt.Errorf("session/new: %w", newErr)
 		}
 		w.pool.updateCatalog(newRes.Models.AvailableModels)
 		w.sessionID = newRes.SessionID
@@ -448,9 +449,9 @@ func (w *worker) executeSession(
 	}
 
 	if req.ModelID != "" && req.ModelID != w.sessionModel {
-		if err := w.callSessionSetModel(ctx, w.sessionID, req.ModelID); err != nil {
+		if setErr := w.callSessionSetModel(ctx, w.sessionID, req.ModelID); setErr != nil {
 			w.resetSessionState()
-			return Usage{}, 0, true, fmt.Errorf("session/set_model(%s): %w", req.ModelID, err)
+			return Usage{}, 0, true, fmt.Errorf("session/set_model(%s): %w", req.ModelID, setErr)
 		}
 		w.sessionModel = req.ModelID
 	}
@@ -759,7 +760,7 @@ func checkCLILogQuota(logPath string, since time.Time) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	const tailBytes = 16 * 1024
 	if info.Size() > tailBytes {

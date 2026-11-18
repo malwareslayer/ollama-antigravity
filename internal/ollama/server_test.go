@@ -331,3 +331,78 @@ func TestV1ModelsAndChatCompletions(t *testing.T) {
 		t.Fatalf("missing SSE [DONE] marker: %s", recSSE.Body.String())
 	}
 }
+
+func TestV1OpenAIStandardization(t *testing.T) {
+	srv, exec := newTestServer(func(_ acp.PromptRequest) []acp.StreamEvent {
+		return []acp.StreamEvent{
+			{Type: acp.EventTextChunk, Text: "ok"},
+			{Type: acp.EventDone, Usage: acp.Usage{InputTokens: 7, OutputTokens: 3}},
+		}
+	})
+	h := srv.Handler()
+
+	// 1. Unknown /v1/* route returns OpenAI JSON error envelope, not plain text 404.
+	rec404 := httptest.NewRecorder()
+	h.ServeHTTP(rec404, httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{}`)))
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("POST /v1/embeddings status = %d, want 404", rec404.Code)
+	}
+	var errEnv openAIErrorEnvelope
+	if err := json.Unmarshal(rec404.Body.Bytes(), &errEnv); err != nil {
+		t.Fatalf("decode 404 openAI error: %v, body=%s", err, rec404.Body.String())
+	}
+	if errEnv.Error.Code == nil || *errEnv.Error.Code != "unknown_url" {
+		t.Fatalf("unexpected 404 error code: %+v", errEnv.Error)
+	}
+
+	// 2. Unsupported n > 1 returns 400 with param="n".
+	recN := httptest.NewRecorder()
+	h.ServeHTTP(recN, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-5-5-medium","n":2,"messages":[{"role":"user","content":"hi"}]}`)))
+	if recN.Code != http.StatusBadRequest {
+		t.Fatalf("n=2 status = %d, want 400", recN.Code)
+	}
+	if err := json.Unmarshal(recN.Body.Bytes(), &errEnv); err != nil || errEnv.Error.Param == nil || *errEnv.Error.Param != "n" {
+		t.Fatalf("unexpected n=2 error: %v, %+v", err, errEnv.Error)
+	}
+
+	// 3. Invalid message role returns 400.
+	recRole := httptest.NewRecorder()
+	h.ServeHTTP(recRole, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-5-5-medium","messages":[{"role":"invalid_role","content":"hi"}]}`)))
+	if recRole.Code != http.StatusBadRequest {
+		t.Fatalf("invalid role status = %d, want 400", recRole.Code)
+	}
+
+	// 4. Sampling options + tool_choice="none" are forwarded/enforced.
+	reqBody := `{
+		"model": "claude-sonnet-5-5-medium",
+		"temperature": 0.2,
+		"top_p": 0.9,
+		"seed": 42,
+		"tool_choice": "none",
+		"tools": [{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],
+		"messages": [{"role": "user", "content": "Hi"}]
+	}`
+	recOpts := httptest.NewRecorder()
+	h.ServeHTTP(recOpts, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody)))
+	if recOpts.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recOpts.Code, recOpts.Body.String())
+	}
+	if !strings.Contains(exec.lastReq.CallerSystem, "temperature=0.2") || !strings.Contains(exec.lastReq.CallerSystem, "top_p=0.9") || !strings.Contains(exec.lastReq.CallerSystem, "seed=42") {
+		t.Fatalf("sampling options not forwarded to CallerSystem: %q", exec.lastReq.CallerSystem)
+	}
+	if strings.Contains(exec.lastReq.CallerSystem, "get_weather") {
+		t.Fatalf("tool_choice=none should suppress tools, got: %q", exec.lastReq.CallerSystem)
+	}
+
+	// 5. stream_options.include_usage emits final usage-only chunk with empty choices.
+	sseBody := `{"model":"claude-sonnet-5-5-medium","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"Hi"}]}`
+	recSSE := httptest.NewRecorder()
+	h.ServeHTTP(recSSE, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(sseBody)))
+	if recSSE.Code != http.StatusOK {
+		t.Fatalf("SSE status = %d", recSSE.Code)
+	}
+	bodyStr := recSSE.Body.String()
+	if !strings.Contains(bodyStr, `"choices":[]`) || !strings.Contains(bodyStr, `"total_tokens":10`) {
+		t.Fatalf("expected final usage-only SSE chunk, got: %s", bodyStr)
+	}
+}

@@ -54,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models/{model}", s.handleV1ModelGet)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleV1ChatCompletions)
 	mux.HandleFunc("POST /v1/completions", s.handleV1Completions)
+	mux.HandleFunc("/v1/", s.handleV1NotFound)
 
 	return s.withCORS(s.withLogging(mux))
 }
@@ -176,7 +177,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 			QuantizationLevel: "cloud",
 		},
 		ModelInfo: map[string]any{
-			"general.architecture":               family,
+			"general.architecture":                   family,
 			fmt.Sprintf("%s.context_length", family): ctxLen,
 		},
 		Capabilities: []string{"completion", "vision", "tools"},
@@ -201,10 +202,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	displayModel := strings.TrimSpace(req.Model)
-	if displayModel == "" {
-		displayModel = resolved.ModelID
-	}
+	displayModel := resolveDisplayModel(req.Model, resolved.ModelID)
 
 	stream := req.Stream == nil || *req.Stream
 	includeThink := req.Think != nil && *req.Think
@@ -273,10 +271,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	displayModel := strings.TrimSpace(req.Model)
-	if displayModel == "" {
-		displayModel = resolved.ModelID
-	}
+	displayModel := resolveDisplayModel(req.Model, resolved.ModelID)
 
 	stream := req.Stream == nil || *req.Stream
 	includeThink := req.Think != nil && *req.Think
@@ -616,6 +611,15 @@ func optionsInstruction(opts map[string]any) string {
 	if np, ok := opts["num_predict"]; ok {
 		hints = append(hints, fmt.Sprintf("max output tokens target: %v", np))
 	}
+	if temp, ok := opts["temperature"]; ok {
+		hints = append(hints, fmt.Sprintf("temperature=%v", temp))
+	}
+	if topP, ok := opts["top_p"]; ok {
+		hints = append(hints, fmt.Sprintf("top_p=%v", topP))
+	}
+	if seed, ok := opts["seed"]; ok {
+		hints = append(hints, fmt.Sprintf("seed=%v", seed))
+	}
 	if len(hints) == 0 {
 		return ""
 	}
@@ -873,11 +877,33 @@ func modelDigest(modelID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func resolveDisplayModel(requested, resolvedID string) string {
+	if trimmed := strings.TrimSpace(requested); trimmed != "" {
+		return trimmed
+	}
+	return resolvedID
+}
+
+func parseStopOption(raw json.RawMessage) (any, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, false
+	}
+	var stopAny any
+	if json.Unmarshal(raw, &stopAny) != nil {
+		return nil, false
+	}
+	return stopAny, true
+}
+
 func decodeJSONBody(r *http.Request, dst any) error {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	limited := io.LimitReader(r.Body, maxRequestBodyBytes)
 	dec := json.NewDecoder(limited)
 	if err := dec.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return errors.New("request body is empty")
+		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil
@@ -907,7 +933,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
