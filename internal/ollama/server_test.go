@@ -261,3 +261,73 @@ func TestChatNativeToolBlockedReturns403(t *testing.T) {
 		t.Fatalf("unexpected error body: %s", rec.Body.String())
 	}
 }
+
+func TestV1ModelsAndChatCompletions(t *testing.T) {
+	srv, _ := newTestServer(func(_ acp.PromptRequest) []acp.StreamEvent {
+		return []acp.StreamEvent{
+			{Type: acp.EventThoughtChunk, Text: "step1"},
+			{Type: acp.EventTextChunk, Text: `{"answer":42}`},
+			{Type: acp.EventDone, Usage: acp.Usage{InputTokens: 12, OutputTokens: 6}},
+		}
+	})
+	h := srv.Handler()
+
+	// GET /v1/ and GET /v1/models should both return the filtered list
+	for _, path := range []string{"/v1", "/v1/", "/v1/models"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d", path, rec.Code)
+		}
+		var list openAIModelsList
+		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if list.Object != "list" || len(list.Data) != 1 || list.Data[0].ID != "claude-sonnet-5-5-medium" {
+			t.Fatalf("unexpected models list at %s: %+v", path, list)
+		}
+	}
+
+	// GET /v1/models/{excluded} -> 404
+	recEx := httptest.NewRecorder()
+	h.ServeHTTP(recEx, httptest.NewRequest(http.MethodGet, "/v1/models/gemini-pro-orchestrator-g1-pro", nil))
+	if recEx.Code != http.StatusNotFound {
+		t.Fatalf("GET /v1/models/excluded status = %d, want 404", recEx.Code)
+	}
+
+	// POST /v1/chat/completions non-streaming
+	reqBody := `{
+		"model": "claude-sonnet-5-5-medium",
+		"response_format": {"type": "json_object"},
+		"messages": [{"role": "user", "content": "Answer"}]
+	}`
+	recChat := httptest.NewRecorder()
+	h.ServeHTTP(recChat, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody)))
+	if recChat.Code != http.StatusOK {
+		t.Fatalf("POST /v1/chat/completions status = %d, body=%s", recChat.Code, recChat.Body.String())
+	}
+	var comp openAIChatResponse
+	if err := json.Unmarshal(recChat.Body.Bytes(), &comp); err != nil {
+		t.Fatalf("decode v1 chat: %v", err)
+	}
+	if comp.Object != "chat.completion" || len(comp.Choices) != 1 || comp.Choices[0].Message.Content != `{"answer":42}` {
+		t.Fatalf("unexpected v1 chat response: %+v", comp)
+	}
+	if comp.Usage == nil || comp.Usage.TotalTokens != 18 {
+		t.Fatalf("unexpected usage: %+v", comp.Usage)
+	}
+
+	// POST /v1/chat/completions streaming SSE
+	streamBody := `{"model":"claude-sonnet-5-5-medium","stream":true,"messages":[{"role":"user","content":"Hi"}]}`
+	recSSE := httptest.NewRecorder()
+	h.ServeHTTP(recSSE, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(streamBody)))
+	if recSSE.Code != http.StatusOK {
+		t.Fatalf("POST /v1/chat/completions stream status = %d", recSSE.Code)
+	}
+	if ct := recSSE.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if !strings.Contains(recSSE.Body.String(), "data: [DONE]") {
+		t.Fatalf("missing SSE [DONE] marker: %s", recSSE.Body.String())
+	}
+}

@@ -48,6 +48,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/show", s.handleShow)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
 	mux.HandleFunc("POST /api/generate", s.handleGenerate)
+	mux.HandleFunc("GET /v1", s.handleV1Models)
+	mux.HandleFunc("GET /v1/{$}", s.handleV1Models)
+	mux.HandleFunc("GET /v1/models", s.handleV1Models)
+	mux.HandleFunc("GET /v1/models/{model}", s.handleV1ModelGet)
+	mux.HandleFunc("POST /v1/chat/completions", s.handleV1ChatCompletions)
+	mux.HandleFunc("POST /v1/completions", s.handleV1Completions)
 
 	return s.withCORS(s.withLogging(mux))
 }

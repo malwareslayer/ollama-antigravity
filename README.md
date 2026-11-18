@@ -9,13 +9,10 @@ Zero-dependency Go HTTP bridge exposing an Ollama-compatible API backed by a wor
 - **Zero Zombie Processes**: Each worker runs in a dedicated OS-locked thread (`runtime.LockOSThread()`) with `SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}` and kills/reaps on timeout or error.
 - **Native Antigravity Tool Restriction**: Runs in `HEADLESS INFERENCE MODE` with `--sandbox` (`ACP_SANDBOX=true`) and stream-level neutralization (`ACP_RESTRICT_NATIVE_TOOLS=true`), killing and respawning any worker that attempts native Antigravity tool invocations (`tool_call`/`tool_call_update`). Client-supplied `tools` use the `<tool_call>{...}</tool_call>` protocol.
 - **Model Filtering**: Dynamically discovers models from `agy acp` and excludes Orchestrator models (`gemini-pro-orchestrator-g1-pro` and `orchestrator` substring by default via `ACP_EXCLUDE_MODELS`) from `/api/tags`, `/api/show`, `/api/chat`, and `/api/generate`.
-- **Ollama-Compatible Endpoints**:
+- **Ollama & OpenAI `/v1/` Endpoints**:
   - `GET /`, `HEAD /` (`"Ollama is running"`)
-  - `GET /api/tags`
-  - `POST /api/show`
-  - `POST /api/chat` (streaming NDJSON & non-streaming, `format: "json"` / JSON Schema, `images`, `think`, `tools`)
-  - `POST /api/generate` (streaming NDJSON & non-streaming)
-  - `GET /api/version`, `GET /api/ps`, `GET /healthz`
+  - `GET /api/tags`, `POST /api/show`, `POST /api/chat`, `POST /api/generate`, `GET /api/version`, `GET /api/ps`, `GET /healthz`
+  - `GET /v1/`, `GET /v1/models`, `GET /v1/models/{model}`, `POST /v1/chat/completions` (SSE streaming & non-streaming, `tools`, `response_format`), `POST /v1/completions`
 
 ## Configuration (Environment Variables)
 
