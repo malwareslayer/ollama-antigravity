@@ -144,8 +144,8 @@ func TestChatNonStreamingAndJSONFenceStrip(t *testing.T) {
 	if !resp.Done || resp.EvalCount != 5 || resp.PromptEvalCount != 10 {
 		t.Fatalf("unexpected metadata: %+v", resp)
 	}
-	if !strings.Contains(exec.lastReq.SystemPrompt, "Extract JSON.") {
-		t.Fatalf("system prompt missing user system message: %q", exec.lastReq.SystemPrompt)
+	if !strings.Contains(exec.lastReq.CallerSystem, "Extract JSON.") {
+		t.Fatalf("caller system prompt missing user system message: %q", exec.lastReq.CallerSystem)
 	}
 }
 

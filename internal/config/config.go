@@ -20,6 +20,7 @@ type Config struct {
 	DefaultModel         string
 	DisableTelemetry     bool
 	IncludeDefaultCustom bool
+	IsolatedGeminiDir    bool
 	Sandbox              bool
 	RestrictNativeTools  bool
 	SessionReuse         bool
@@ -42,6 +43,7 @@ func Load() (Config, error) {
 		DefaultModel:         envOrDefault("ACP_DEFAULT_MODEL", "claude-sonnet-5-5-medium"),
 		DisableTelemetry:     true,
 		IncludeDefaultCustom: false,
+		IsolatedGeminiDir:    true,
 		Sandbox:              true,
 		RestrictNativeTools:  true,
 		SessionReuse:         true,
@@ -86,6 +88,14 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("invalid ACP_INCLUDE_DEFAULT_CUSTOMIZATIONS=%q: %w", raw, err)
 		}
 		cfg.IncludeDefaultCustom = b
+	}
+
+	if raw, ok := os.LookupEnv("ACP_ISOLATED_GEMINI_DIR"); ok {
+		b, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return cfg, fmt.Errorf("invalid ACP_ISOLATED_GEMINI_DIR=%q: %w", raw, err)
+		}
+		cfg.IsolatedGeminiDir = b
 	}
 
 	if raw, ok := os.LookupEnv("ACP_SANDBOX"); ok {

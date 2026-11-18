@@ -49,6 +49,7 @@ func IsQuotaErrorText(s string) bool {
 type PromptRequest struct {
 	ModelID      string
 	SystemPrompt string
+	CallerSystem string
 	Prompt       []ContentBlock
 }
 
@@ -106,11 +107,12 @@ type worker struct {
 	proc   *childProc
 	nextID int64
 
-	sessionID      string
-	sessionModel   string
-	sessionSysHash string
-	sessionTurns   int
-	sessionTokens  int
+	sessionID         string
+	sessionModel      string
+	sessionSysHash    string
+	lastCallerSysHash string
+	sessionTurns      int
+	sessionTokens     int
 }
 
 func newWorker(id int, cfg config.Config, logger *slog.Logger, pool *Pool) *worker {
@@ -266,6 +268,11 @@ func (w *worker) spawnAndInit() error {
 	if w.cfg.Sandbox {
 		args = append(args, "--sandbox")
 	}
+	if w.cfg.IsolatedGeminiDir {
+		geminiEmpty := filepath.Join(w.cfg.EmptyCWD, ".gemini-empty")
+		_ = os.MkdirAll(geminiEmpty, 0o755)
+		args = append(args, "--gemini-dir", geminiEmpty)
+	}
 
 	cmd := exec.Command(w.cfg.AgyBin, args...)
 	cmd.Dir = w.cfg.EmptyCWD
@@ -374,6 +381,7 @@ func (w *worker) resetSessionState() {
 	w.sessionID = ""
 	w.sessionModel = ""
 	w.sessionSysHash = ""
+	w.lastCallerSysHash = ""
 	w.sessionTurns = 0
 	w.sessionTokens = 0
 }
@@ -447,14 +455,28 @@ func (w *worker) executeSession(
 		w.sessionModel = req.ModelID
 	}
 
+	promptBlocks := req.Prompt
+	callerSys := strings.TrimSpace(req.CallerSystem)
+	callerHash := ""
+	if callerSys != "" {
+		callerHash = hashSystemPrompt(callerSys)
+	}
+	if callerHash != "" && callerHash != w.lastCallerSysHash {
+		prefix := "[SYSTEM]\n" + callerSys + "\n[/SYSTEM]\n\n"
+		promptBlocks = prependTextBlock(promptBlocks, prefix)
+	} else if callerHash == "" && w.lastCallerSysHash != "" {
+		promptBlocks = prependTextBlock(promptBlocks, "[SYSTEM]\nNo caller system prompt for this request.\n[/SYSTEM]\n\n")
+	}
+
 	evalStart := time.Now()
-	promptRes, err := w.callSessionPrompt(ctx, w.sessionID, req.Prompt, events)
+	promptRes, err := w.callSessionPrompt(ctx, w.sessionID, promptBlocks, events)
 	evalDur = time.Since(evalStart)
 	if err != nil {
 		w.resetSessionState()
 		return Usage{}, evalDur, true, fmt.Errorf("session/prompt: %w", err)
 	}
 
+	w.lastCallerSysHash = callerHash
 	w.sessionTurns++
 	w.sessionTokens = promptRes.Usage.TotalTokens
 
@@ -470,6 +492,16 @@ func (w *worker) executeSession(
 	}
 
 	return promptRes.Usage, evalDur, false, nil
+}
+
+func prependTextBlock(blocks []ContentBlock, prefix string) []ContentBlock {
+	out := make([]ContentBlock, len(blocks))
+	copy(out, blocks)
+	if len(out) > 0 && out[0].Type == "text" {
+		out[0].Text = prefix + out[0].Text
+		return out
+	}
+	return append([]ContentBlock{{Type: "text", Text: prefix}}, out...)
 }
 
 func hashSystemPrompt(s string) string {

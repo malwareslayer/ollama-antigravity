@@ -27,6 +27,7 @@ Zero-dependency Go HTTP bridge exposing an Ollama-compatible API backed by a wor
 | `ACP_DEFAULT_MODEL` | `claude-sonnet-5-5-medium` | Fallback model when request omits `model` |
 | `ACP_DISABLE_TELEMETRY` | `true` | Pass `--disable-telemetry` to `agy acp` |
 | `ACP_INCLUDE_DEFAULT_CUSTOMIZATIONS` | `false` | Pass `--include-default-customizations=false` when `false` |
+| `ACP_ISOLATED_GEMINI_DIR` | `true` | Pass `--gemini-dir <empty>` to skip `~/.gemini/GEMINI.md` token overhead |
 | `ACP_SANDBOX` | `true` | Pass `--sandbox` to `agy acp` |
 | `ACP_RESTRICT_NATIVE_TOOLS` | `true` | Kill & respawn worker if Antigravity invokes native `tool_call` |
 | `ACP_SESSION_REUSE` | `true` | Reuse 1 warm ACP session per worker when system prompt matches |

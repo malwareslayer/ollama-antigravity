@@ -463,22 +463,24 @@ func buildFinalGenerateResponse(model, text, thinking string, done acp.StreamEve
 	}
 }
 
+const baseHeadlessSystemPrompt = "HEADLESS INFERENCE MODE: Native Antigravity tools " +
+	"(run_command, write_to_file, view_file, read_file, edit_file, grep_search, find_by_name, list_dir, browser) " +
+	"are disabled and terminate the session. Never invoke them. Treat each request independently."
+
 func buildChatPrompt(modelID string, req ChatRequest) acp.PromptRequest {
-	sysParts := []string{
-		"You are operating in HEADLESS INFERENCE MODE behind an Ollama-compatible API bridge. " +
-			"In this mode, all Antigravity native function-calling and tool-use channels " +
-			"(run_command, write_to_file, view_file, read_file, edit_file, replace_file_content, " +
-			"multi_replace_file_content, find_by_name, grep_search, list_dir, browser, etc.) are DISABLED " +
-			"and will fail or terminate the session immediately. NEVER emit native Antigravity function calls " +
-			"or invoke local filesystem, shell, or IDE tools. Treat each request as independent and answer directly from its input.",
-	}
+	var callerSysParts []string
+	seenSys := make(map[string]struct{})
 
 	var convMsgs []ChatMessage
 	for _, m := range req.Messages {
 		role := strings.ToLower(strings.TrimSpace(m.Role))
 		if role == "system" || role == "developer" {
-			if strings.TrimSpace(m.Content) != "" {
-				sysParts = append(sysParts, m.Content)
+			trimmed := strings.TrimSpace(m.Content)
+			if trimmed != "" {
+				if _, dup := seenSys[trimmed]; !dup {
+					seenSys[trimmed] = struct{}{}
+					callerSysParts = append(callerSysParts, trimmed)
+				}
 			}
 			continue
 		}
@@ -486,13 +488,13 @@ func buildChatPrompt(modelID string, req ChatRequest) acp.PromptRequest {
 	}
 
 	if formatHint := formatInstruction(req.Format); formatHint != "" {
-		sysParts = append(sysParts, formatHint)
+		callerSysParts = append(callerSysParts, formatHint)
 	}
 	if toolHint := toolsInstruction(req.Tools); toolHint != "" {
-		sysParts = append(sysParts, toolHint)
+		callerSysParts = append(callerSysParts, toolHint)
 	}
 	if optHint := optionsInstruction(req.Options); optHint != "" {
-		sysParts = append(sysParts, optHint)
+		callerSysParts = append(callerSysParts, optHint)
 	}
 
 	var blocks []acp.ContentBlock
@@ -563,7 +565,8 @@ func buildChatPrompt(modelID string, req ChatRequest) acp.PromptRequest {
 
 	return acp.PromptRequest{
 		ModelID:      modelID,
-		SystemPrompt: strings.Join(sysParts, "\n\n"),
+		SystemPrompt: baseHeadlessSystemPrompt,
+		CallerSystem: strings.Join(callerSysParts, "\n\n"),
 		Prompt:       blocks,
 	}
 }
