@@ -25,6 +25,8 @@ type Config struct {
 	SessionReuse         bool
 	SessionMaxTurns      int
 	SessionMaxTokens     int
+	FallbackModel        string
+	FallbackCooldown     time.Duration
 	LogLevel             slog.Level
 }
 
@@ -45,6 +47,8 @@ func Load() (Config, error) {
 		SessionReuse:         true,
 		SessionMaxTurns:      20,
 		SessionMaxTokens:     120000,
+		FallbackModel:        "gemini-3.8-flash-low",
+		FallbackCooldown:     300 * time.Second,
 		LogLevel:             slog.LevelInfo,
 	}
 
@@ -122,6 +126,18 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("invalid ACP_SESSION_MAX_TOKENS=%q: must be >= 1000", v)
 		}
 		cfg.SessionMaxTokens = n
+	}
+
+	if raw, ok := os.LookupEnv("ACP_FALLBACK_MODEL"); ok {
+		cfg.FallbackModel = strings.TrimSpace(raw)
+	}
+
+	if v := strings.TrimSpace(os.Getenv("ACP_FALLBACK_COOLDOWN_SEC")); v != "" {
+		sec, err := strconv.Atoi(v)
+		if err != nil || sec < 0 {
+			return cfg, fmt.Errorf("invalid ACP_FALLBACK_COOLDOWN_SEC=%q: must be non-negative integer", v)
+		}
+		cfg.FallbackCooldown = time.Duration(sec) * time.Second
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("LOG_LEVEL")); raw != "" {

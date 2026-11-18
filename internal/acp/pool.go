@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"ollama-antigravity/internal/config"
 )
@@ -35,19 +36,21 @@ type Pool struct {
 
 	closeOnce sync.Once
 
-	mu      sync.RWMutex
-	catalog []AvailableModel
-	allRaw  []AvailableModel
+	mu             sync.RWMutex
+	catalog        []AvailableModel
+	allRaw         []AvailableModel
+	exhaustedUntil map[string]time.Time
 }
 
 // NewPool constructs a worker pool without starting subprocesses yet.
 func NewPool(cfg config.Config, logger *slog.Logger) *Pool {
 	return &Pool{
-		cfg:      cfg,
-		logger:   logger,
-		idle:     make(chan *worker, cfg.Workers),
-		workers:  make([]*worker, 0, cfg.Workers),
-		closedCh: make(chan struct{}),
+		cfg:            cfg,
+		logger:         logger,
+		idle:           make(chan *worker, cfg.Workers),
+		workers:        make([]*worker, 0, cfg.Workers),
+		closedCh:       make(chan struct{}),
+		exhaustedUntil: make(map[string]time.Time),
 	}
 }
 
@@ -246,7 +249,86 @@ func ResolveFromCatalog(
 }
 
 // Execute acquires an idle worker, dispatches the prompt request, and streams events.
+// When the primary model's usage/quota is exhausted before any output is emitted,
+// Execute automatically falls back to cfg.FallbackModel (default: gemini-3.8-flash-low).
 func (p *Pool) Execute(ctx context.Context, req PromptRequest) (<-chan StreamEvent, error) {
+	effectiveReq := req
+	fallback := strings.TrimSpace(p.cfg.FallbackModel)
+	if fallback != "" && effectiveReq.ModelID != fallback && p.isModelExhausted(effectiveReq.ModelID) {
+		p.logger.Warn("primary model in quota cooldown; routing directly to fallback",
+			"from", effectiveReq.ModelID,
+			"to", fallback,
+		)
+		effectiveReq.ModelID = fallback
+	}
+
+	primaryCh, err := p.dispatchOnce(ctx, effectiveReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if fallback == "" || effectiveReq.ModelID == fallback {
+		return primaryCh, nil
+	}
+
+	out := make(chan StreamEvent, 64)
+	go func() {
+		defer close(out)
+		emittedOutput := false
+		for ev := range primaryCh {
+			switch ev.Type {
+			case EventTextChunk, EventThoughtChunk:
+				emittedOutput = true
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case EventError:
+				if !emittedOutput && errors.Is(ev.Err, ErrQuotaExhausted) && ctx.Err() == nil {
+					p.markModelExhausted(effectiveReq.ModelID)
+					p.logger.Warn("primary model usage/quota exhausted; failing over to fallback",
+						"from", effectiveReq.ModelID,
+						"to", fallback,
+						"err", ev.Err,
+					)
+					fbReq := effectiveReq
+					fbReq.ModelID = fallback
+					fbCh, fbErr := p.dispatchOnce(ctx, fbReq)
+					if fbErr != nil {
+						select {
+						case out <- StreamEvent{Type: EventError, Err: fbErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
+					for fbEv := range fbCh {
+						select {
+						case out <- fbEv:
+						case <-ctx.Done():
+							return
+						}
+					}
+					return
+				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+				}
+				return
+			default:
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (p *Pool) dispatchOnce(ctx context.Context, req PromptRequest) (<-chan StreamEvent, error) {
 	var w *worker
 	select {
 	case w = <-p.idle:
@@ -272,4 +354,23 @@ func (p *Pool) Execute(ctx context.Context, req PromptRequest) (<-chan StreamEve
 		p.release(w)
 		return nil, ErrPoolClosed
 	}
+}
+
+func (p *Pool) isModelExhausted(modelID string) bool {
+	if p.cfg.FallbackCooldown <= 0 {
+		return false
+	}
+	p.mu.RLock()
+	until, ok := p.exhaustedUntil[modelID]
+	p.mu.RUnlock()
+	return ok && time.Now().Before(until)
+}
+
+func (p *Pool) markModelExhausted(modelID string) {
+	if p.cfg.FallbackCooldown <= 0 || modelID == "" {
+		return
+	}
+	p.mu.Lock()
+	p.exhaustedUntil[modelID] = time.Now().Add(p.cfg.FallbackCooldown)
+	p.mu.Unlock()
 }

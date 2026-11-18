@@ -2,7 +2,12 @@ package acp
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
+
+	"ollama-antigravity/internal/config"
 )
 
 func sampleRawModels() []AvailableModel {
@@ -72,5 +77,45 @@ func TestResolveFromCatalog(t *testing.T) {
 				t.Fatalf("ResolveFromCatalog(%q) = %q, want %q", tc.req, got.ModelID, tc.wantID)
 			}
 		})
+	}
+}
+
+func TestIsQuotaErrorText(t *testing.T) {
+	positives := []string{
+		"RESOURCE_EXHAUSTED: Individual quota reached for claude-sonnet-5-5",
+		"API error code 429: RESOURCE_EXHAUSTED",
+		"AI credits balance is too low to continue",
+		"Daily or billing cap reached",
+		"MODEL_CAPACITY_EXHAUSTED",
+	}
+	for _, s := range positives {
+		if !IsQuotaErrorText(s) {
+			t.Errorf("IsQuotaErrorText(%q) = false, want true", s)
+		}
+	}
+	negatives := []string{
+		"normal response text",
+		"invalid JSON body",
+	}
+	for _, s := range negatives {
+		if IsQuotaErrorText(s) {
+			t.Errorf("IsQuotaErrorText(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestPoolQuotaCooldown(t *testing.T) {
+	p := NewPool(config.Config{
+		Workers:          1,
+		FallbackModel:    "gemini-3.8-flash-low",
+		FallbackCooldown: 10 * time.Second,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if p.isModelExhausted("claude-sonnet-5-5-low") {
+		t.Fatal("expected model not exhausted initially")
+	}
+	p.markModelExhausted("claude-sonnet-5-5-low")
+	if !p.isModelExhausted("claude-sonnet-5-5-low") {
+		t.Fatal("expected model exhausted after markModelExhausted")
 	}
 }

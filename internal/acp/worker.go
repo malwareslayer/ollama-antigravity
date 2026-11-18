@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +24,26 @@ import (
 
 // ErrNativeToolBlocked indicates agy attempted an internal native tool call in headless mode.
 var ErrNativeToolBlocked = errors.New("native antigravity tool invocation is disabled")
+
+// ErrQuotaExhausted indicates the selected model hit a quota, credits, or 429 capacity limit.
+var ErrQuotaExhausted = errors.New("model usage/quota exhausted")
+
+// IsQuotaErrorText reports whether an error/log line indicates quota, credit, or 429 exhaustion.
+func IsQuotaErrorText(s string) bool {
+	low := strings.ToLower(s)
+	switch {
+	case strings.Contains(low, "ai credits balance is too low"),
+		strings.Contains(low, "credits balance is too low"),
+		strings.Contains(low, "daily or billing cap"),
+		strings.Contains(low, "individual quota reached"),
+		strings.Contains(low, "quota exceeded"),
+		strings.Contains(low, "quota exhausted"),
+		strings.Contains(low, "model_capacity_exhausted"),
+		strings.Contains(low, "resource_exhausted") && (strings.Contains(low, "429") || strings.Contains(low, "quota")):
+		return true
+	}
+	return false
+}
 
 // PromptRequest defines a single inference job for an ACP worker.
 type PromptRequest struct {
@@ -65,6 +87,8 @@ type childProc struct {
 	cmd        *exec.Cmd
 	stdin      io.WriteCloser
 	rpcCh      chan rpcEvent
+	quotaCh    chan string
+	cliLogPath string
 	readerDone chan struct{}
 	stderrDone chan struct{}
 }
@@ -229,7 +253,10 @@ func (w *worker) spawnAndBootstrap() ([]AvailableModel, error) {
 func (w *worker) spawnAndInit() error {
 	w.killAndReap()
 
-	args := []string{"acp"}
+	cliLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("ollama-antigravity-acp-w%d.log", w.id))
+	_ = os.Remove(cliLogPath)
+
+	args := []string{"acp", "--cli_log_file", cliLogPath}
 	if w.cfg.DisableTelemetry {
 		args = append(args, "--disable-telemetry")
 	}
@@ -272,12 +299,14 @@ func (w *worker) spawnAndInit() error {
 		cmd:        cmd,
 		stdin:      stdin,
 		rpcCh:      make(chan rpcEvent, 64),
+		quotaCh:    make(chan string, 1),
+		cliLogPath: cliLogPath,
 		readerDone: make(chan struct{}),
 		stderrDone: make(chan struct{}),
 	}
 
 	go w.readStdout(stdout, proc.rpcCh, proc.readerDone)
-	go w.drainStderr(stderr, proc.stderrDone)
+	go w.drainStderr(stderr, proc.quotaCh, proc.stderrDone)
 
 	w.proc = proc
 	w.nextID = 0
@@ -321,13 +350,20 @@ func (w *worker) readStdout(r io.Reader, out chan<- rpcEvent, done chan<- struct
 	out <- rpcEvent{err: io.EOF}
 }
 
-func (w *worker) drainStderr(r io.Reader, done chan<- struct{}) {
+func (w *worker) drainStderr(r io.Reader, quotaCh chan<- string, done chan<- struct{}) {
 	defer close(done)
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 16*1024), 1024*1024)
 	for scanner.Scan() {
-		w.logger.Debug("agy stderr", "line", scanner.Text())
+		line := scanner.Text()
+		w.logger.Debug("agy stderr", "line", line)
+		if IsQuotaErrorText(line) {
+			select {
+			case quotaCh <- line:
+			default:
+			}
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		w.logger.Debug("agy stderr read ended", "err", err)
@@ -582,14 +618,32 @@ func (w *worker) rpcCall(
 		return nil, fmt.Errorf("write %s: %w", method, err)
 	}
 
+	callStart := time.Now()
+	var quotaTick *time.Ticker
+	var quotaTickC <-chan time.Time
+	if method == "session/prompt" {
+		quotaTick = time.NewTicker(300 * time.Millisecond)
+		quotaTickC = quotaTick.C
+		defer quotaTick.Stop()
+	}
+
 	for {
 		select {
 		case <-w.stopCh:
 			return nil, errors.New("worker shutting down")
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case qLine := <-w.proc.quotaCh:
+			return nil, fmt.Errorf("%w: %s", ErrQuotaExhausted, strings.TrimSpace(qLine))
+		case <-quotaTickC:
+			if qLine := checkCLILogQuota(w.proc.cliLogPath, callStart); qLine != "" {
+				return nil, fmt.Errorf("%w: %s", ErrQuotaExhausted, qLine)
+			}
 		case ev, ok := <-w.proc.rpcCh:
 			if !ok {
+				if qLine := checkCLILogQuota(w.proc.cliLogPath, callStart); qLine != "" {
+					return nil, fmt.Errorf("%w: %s", ErrQuotaExhausted, qLine)
+				}
 				return nil, io.EOF
 			}
 			if ev.err != nil {
@@ -616,11 +670,45 @@ func (w *worker) rpcCall(
 				continue
 			}
 			if msg.Error != nil {
+				if IsQuotaErrorText(msg.Error.Message) {
+					return nil, fmt.Errorf("%w: %s", ErrQuotaExhausted, msg.Error.Message)
+				}
 				return nil, msg.Error
 			}
 			return msg.Result, nil
 		}
 	}
+}
+
+func checkCLILogQuota(logPath string, since time.Time) string {
+	if logPath == "" {
+		return ""
+	}
+	info, err := os.Stat(logPath)
+	if err != nil || info.ModTime().Before(since.Add(-2*time.Second)) {
+		return ""
+	}
+	f, err := os.Open(logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	const tailBytes = 16 * 1024
+	if info.Size() > tailBytes {
+		_, _ = f.Seek(-tailBytes, io.SeekEnd)
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(buf), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if IsQuotaErrorText(lines[i]) {
+			return strings.TrimSpace(lines[i])
+		}
+	}
+	return ""
 }
 
 func (w *worker) handleServerRequest(msg RPCMessage) {

@@ -32,6 +32,8 @@ Zero-dependency Go HTTP bridge exposing an Ollama-compatible API backed by a wor
 | `ACP_SESSION_REUSE` | `true` | Reuse 1 warm ACP session per worker when system prompt matches |
 | `ACP_SESSION_MAX_TURNS` | `20` | Rotate reused session after N turns |
 | `ACP_SESSION_MAX_TOKENS` | `120000` | Rotate reused session when `totalTokens` reaches limit |
+| `ACP_FALLBACK_MODEL` | `gemini-3.8-flash-low` | Automatic fallback model when primary model usage/quota is exhausted |
+| `ACP_FALLBACK_COOLDOWN_SEC` | `300` | Seconds to route directly to fallback after primary quota exhaustion |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 
 ## Build & Run
